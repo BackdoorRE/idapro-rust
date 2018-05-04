@@ -1,0 +1,12 @@
+[package]
+name = "rida"
+version = "0.1.0"
+authors = ["Sam Thomas <m@kali.ai>"]
+
+[dependencies]
+error-chain = "0.11.0"
+lazy_static = "1.0.0"
+regex = "0.2"
+tempfile = "2.2.0"
+failure = "0.1"
+failure_derive = "0.1"
