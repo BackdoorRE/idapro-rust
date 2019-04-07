@@ -59,7 +59,7 @@ pub struct IDA {
 
 lazy_static! {
     static ref CAPABILITIES: Regex =
-        Regex::new("^(?:.*/)?ida(?P<mode>l|q|w)(?P<bits>(?:64)?)$").unwrap();
+        Regex::new("^(?:.*[/\\\\])?ida(?P<mode>l|q|w)(?P<bits>(?:64)?)(:?\\.exe)?$").unwrap();
 }
 
 /// IDA implements the core functionality of rida it provides a context with
