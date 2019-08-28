@@ -3,27 +3,44 @@
 
 #[macro_use]
 extern crate lazy_static;
-extern crate regex;
-extern crate tempfile;
-extern crate failure;
 #[macro_use]
 extern crate failure_derive;
+#[macro_use]
+extern crate serde_derive;
 
-use std::fs::remove_file;
+use std::fs::{File, remove_file};
 use std::process;
 use std::io::Write;
+use std::path::Path;
 
 use regex::Regex;
-use tempfile::NamedTempFileOptions;
 
-use failure::Error as FError;
+use failure::Error;
 
 #[derive(Debug, Fail)]
-enum Error {
+enum IdaError {
     #[fail(display = "invalid path to IDA executable: {}", path)]
     InvalidPath {
         path: String,
     },
+}
+
+// Exported basic block information
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
+pub struct Block {
+    pub start_addr: u64,
+    pub end_addr: u64,
+    pub t_reg: Option<bool>,
+    pub dests: Vec<u64>,
+}
+
+// Exported function information
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
+pub struct Function {
+    pub name: String,
+    pub start_addr: u64,
+    pub end_addr: u64,
+    pub blocks: Vec<Block>,
 }
 
 /// IDA analysis capability.
@@ -73,7 +90,7 @@ impl IDA {
     /// the given IDA executable. For instance: `idal64` will run headless in
     /// 64-bit mode, whereas `idaq` will run with a graphical interface in
     /// 32-bit mode.
-    pub fn new(ida_path: &str) -> Result<IDA, FError> {
+    pub fn new(ida_path: &str) -> Result<IDA, Error> {
         CAPABILITIES.captures(ida_path)
             .map(|caps| IDA {
                 exec: ida_path.to_owned(),
@@ -82,7 +99,7 @@ impl IDA {
                 remove_database: true,
                 script_type: Type::Python,
             })
-            .ok_or(Error::InvalidPath { path: ida_path.to_owned() }.into())
+            .ok_or(IdaError::InvalidPath { path: ida_path.to_owned() }.into())
     }
 
     /// Sets if the IDA database is removed upon script completion.
@@ -111,13 +128,14 @@ impl IDA {
 
     /// Runs the script with the contents given as `script` on the `target`
     /// executable.
-    pub fn run(&self, script: &str, target: &str) -> Result<bool, FError> {
-        let mut script_file = NamedTempFileOptions::new()
+    pub fn run<T: AsRef<Path>>(&self, script: &str, target: T) -> Result<bool, Error> {
+        let target = target.as_ref();
+        let mut script_file = tempfile::Builder::new()
             .suffix(if self.script_type == Type::Python { ".py" } else { ".idc" })
-            .create()?;
+            .tempfile()?;
 
         script_file.write(script.as_bytes())?;
-        script_file.sync_all()?;
+        script_file.as_file().sync_all()?;
 
         let mut cmd = process::Command::new(&self.exec);
 
@@ -125,16 +143,56 @@ impl IDA {
             cmd.env("TVHEADLESS", "1");
         }
 
-        cmd.args(&["-A", &format!("-S{}", script_file.path().display()), target]);
+        let target_str = target.to_str().unwrap();
+        cmd.args(&["-A", &format!("-S{}", script_file.path().display()), target_str.as_ref()]);
 
         let output = cmd.output()?;
 
         if self.remove_database {
             // Can fail, in the case of, e.g., an unpacked database.
-            let target_path = format!("{}.{}", target, if self.bits == Bits::Bits32 { "idb" } else { "i64" });
+            let target_path = format!("{}.{}", target.display(), if self.bits == Bits::Bits32 { "idb" } else { "i64" });
             remove_file(&target_path).ok();
         }
 
         Ok(output.status.success())
+    }
+
+    pub fn function_names<T: AsRef<Path>>(&self, target: T) -> Result<Vec<String>, Error> {
+        let json = tempfile::Builder::new()
+            .suffix("json")
+            .tempfile()?;
+        let path = json.into_temp_path();
+        let command = format!(include_str!("../python/function_names.py"), path.display());
+
+        self.run(&command, target)?;
+
+        let json = File::open(&path)?;
+        serde_json::from_reader::<_, Vec<String>>(&json).map_err(Error::from)
+    }
+
+    pub fn function_boundaries<T: AsRef<Path>>(&self, target: T) -> Result<Vec<(u64, u64)>, Error> {
+        let json = tempfile::Builder::new()
+            .suffix("json")
+            .tempfile()?;
+        let path = json.into_temp_path();
+        let command = format!(include_str!("../python/function_starts.py"), path.display());
+
+        self.run(&command, target)?;
+
+        let json = File::open(&path)?;
+        serde_json::from_reader::<_, Vec<(u64, u64)>>(&json).map_err(Error::from)
+    }
+
+    pub fn function_cfgs<T: AsRef<Path>>(&self, target: T) -> Result<Vec<Function>, Error> {
+        let json = tempfile::Builder::new()
+            .suffix("json")
+            .tempfile()?;
+        let path = json.into_temp_path();
+        let command = format!(include_str!("../python/function_cfgs.py"), path.display());
+
+        self.run(&command, target)?;
+
+        let json = File::open(&path)?;
+        serde_json::from_reader::<_, Vec<Function>>(&json).map_err(Error::from)
     }
 }
