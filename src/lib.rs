@@ -18,7 +18,7 @@ use regex::Regex;
 use failure::Error;
 
 #[derive(Debug, Fail)]
-enum IdaError {
+pub enum IdaError {
     #[fail(display = "invalid path to IDA executable: {}", path)]
     InvalidPath {
         path: String,
@@ -70,13 +70,19 @@ pub struct IDA {
     exec: String,
     bits: Bits,
     mode: Mode,
+    wine: bool,
     remove_database: bool,
     script_type: Type,
 }
 
 lazy_static! {
     static ref CAPABILITIES: Regex =
-        Regex::new("^(?:.*[/\\\\])?ida(?P<mode>l|q|w)(?P<bits>(?:64)?)(:?\\.exe)?$").unwrap();
+        Regex::new("^(?:.*[/\\\\])?ida(?P<mode>l|q|w)(?P<bits>(?:64)?)(?P<exe>(?:\\.exe)?)$").unwrap();
+}
+
+fn windowsify<S: AsRef<str>>(path: S) -> String {
+    let path = path.as_ref();
+    if path.starts_with("/") { &path[1..] } else { path }.replace("/", "\\")
 }
 
 /// IDA implements the core functionality of rida it provides a context with
@@ -85,7 +91,7 @@ impl IDA {
     /// Creates a new context to interface with IDA; the default script type is
     /// IDA, and the generated IDA database shall be removed upon script
     /// termination.
-    /// 
+    ///
     /// The capabilities of the IDA context are inferred from the filename of
     /// the given IDA executable. For instance: `idal64` will run headless in
     /// 64-bit mode, whereas `idaq` will run with a graphical interface in
@@ -96,6 +102,7 @@ impl IDA {
                 exec: ida_path.to_owned(),
                 bits: if &caps["bits"] == "" { Bits::Bits32 } else { Bits::Bits64 },
                 mode: if &caps["mode"] == "l" { Mode::Headless } else { Mode::Graphical },
+                wine: !caps["exe"].is_empty(),
                 remove_database: true,
                 script_type: Type::Python,
             })
@@ -137,14 +144,23 @@ impl IDA {
         script_file.write(script.as_bytes())?;
         script_file.as_file().sync_all()?;
 
-        let mut cmd = process::Command::new(&self.exec);
+        let mut cmd = if self.wine {
+            let mut cmd = process::Command::new("wine");
 
-        if self.mode == Mode::Headless {
-            cmd.env("TVHEADLESS", "1");
-        }
+            let target_str = target.to_str().unwrap();
+            cmd.args(&[&self.exec, "-A", &format!("-S{}", windowsify(script_file.path().to_string_lossy())), &windowsify(target_str)]);
+            cmd
+        } else {
+            let mut cmd = process::Command::new(&self.exec);
 
-        let target_str = target.to_str().unwrap();
-        cmd.args(&["-A", &format!("-S{}", script_file.path().display()), target_str.as_ref()]);
+            if self.mode == Mode::Headless {
+                cmd.env("TVHEADLESS", "1");
+            }
+
+            let target_str = target.to_str().unwrap();
+            cmd.args(&["-A", &format!("-S{}", script_file.path().display()), target_str]);
+            cmd
+        };
 
         let output = cmd.output()?;
 
